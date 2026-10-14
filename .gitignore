@@ -1,0 +1,16 @@
+# 실습 원문 데이터
+data/
+
+# 노트북 임시 파일과 Python 캐시
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# 가상환경과 비밀 설정
+.venv/
+venv/
+.env
+.env.*
+
+# macOS에서 생성하는 파일
+.DS_Store
