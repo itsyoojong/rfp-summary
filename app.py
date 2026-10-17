@@ -63,7 +63,9 @@ if "page_results" not in st.session_state:
 
 if "document_result" not in st.session_state:
     st.session_state.document_result = None
-
+    
+if "group_results" not in st.session_state:
+    st.session_state.group_results = {}
 
 # 2. PDF 업로드
 uploaded_file = st.file_uploader(
@@ -83,6 +85,7 @@ if uploaded_file is not None:
         st.session_state.document_id = document_id
         st.session_state.page_results = {}
         st.session_state.document_result = None
+        st.session_state.group_results = {}
 
     try:
         # 3. PDF 읽기
@@ -145,57 +148,92 @@ if uploaded_file is not None:
         else:
             st.warning("텍스트를 추출하지 못했습니다.")
 
-        # 6. 전체 문서 분석
+
+        # 6. 그룹별 문서 분석
         st.divider()
-        st.subheader("첫번째 그룹  분석")
+        st.subheader("그룹별 RFP 분석")
 
-        if st.button("첫번째 그룹 분석 시작"):
+        # 3페이지씩 그룹 생성
+        chunk_size = 3
 
-            try:
-                with st.spinner("문서 그룹을 분석 중입니다."):
-                    #result = analyze_rfp_document(pages)
-                    # 3페이지씩 나누어 그룹 생성
-                    chunk_size = 3
+        page_groups = [
+            pages[i:i + chunk_size]
+            for i in range(0, len(pages), chunk_size)
+        ]
 
-                    page_groups = [
-                        pages[i:i + chunk_size]
-                        for i in range(0, len(pages), chunk_size)
-                    ]
+        total_groups = len(page_groups)
+        completed = len(st.session_state.group_results)
 
-                    # 먼저 첫 번째 그룹만 분석
-                    result = analyze_rfp_document(page_groups[0])
+        # 진행 상황 표시
+        st.write(f"분석 진행: {completed}/{total_groups}개 그룹")
+        st.progress(completed / total_groups)
 
-                    st.write("전체 그룹 수:", len(page_groups))
+        # 아직 분석하지 않은 그룹이 있다면
+        if completed < total_groups:
 
-                st.session_state.document_result = result
+            next_index = completed
+            current_group = page_groups[next_index]
 
-            # except Exception as error:
-            #     st.error(
-            #         f"전체 분석 실패: {type(error).__name__}"
-            #     )
-                # 1. Groq API 오류를 구체적으로 처리
-            except APIStatusError as error:
-                st.error("Groq API 요청 실패")
-                st.write("HTTP 상태 코드:", error.status_code)
-                st.code(str(error)[:500])
+            start_page = current_group[0]["page_number"]
+            end_page = current_group[-1]["page_number"]
 
-    # 2. 그 외 모든 오류 처리
-            except Exception as error:
-                st.error("전체 문서 분석 중 오류 발생")
-                st.write("오류 유형:", type(error).__name__)
+            st.write(
+                f"다음 분석: {start_page}~{end_page}페이지"
+            )
 
-        # 저장된 전체 분석 결과 표시
-        if st.session_state.document_result is not None:
-            result = st.session_state.document_result
+            if st.button("다음 그룹 분석"):
 
+                try:
+                    with st.spinner("Groq 분석 중입니다."):
 
-            st.subheader("전체 문서 분석 결과")
+                        result = analyze_rfp_document(
+                            current_group
+                        )
 
-            st.json(result)
-            warnings = validate_budget_condition(result)
-            
-            for warning in warnings:
-                st.warning(warning)
+                    # 분석 결과 저장
+                    st.session_state.group_results[
+                        next_index
+                    ] = result
+
+                    # 화면 갱신
+                    st.rerun()
+
+                except APIStatusError as error:
+                    st.error("Groq API 요청 실패")
+                    st.write("상태 코드:", error.status_code)
+                    st.code(str(error)[:500])
+
+                except Exception as error:
+                    st.error(
+                        f"분석 오류: {type(error).__name__}"
+                    )
+
+        else:
+            st.success("모든 그룹 분석이 완료됐습니다.")
+
+        # 지금까지 저장된 분석 결과 출력
+        st.subheader("그룹별 분석 결과")
+
+        for group_index in sorted(st.session_state.group_results):
+
+            result = st.session_state.group_results[group_index]
+
+            group_start = group_index * chunk_size + 1
+            group_end = min(
+                (group_index + 1) * chunk_size,
+                len(pages)
+            )
+
+            with st.expander(
+                f"그룹 {group_index + 1}: "
+                f"{group_start}~{group_end}페이지"
+            ):
+                st.json(result)
+
+                warnings = validate_budget_condition(result)
+
+                for warning in warnings:
+                    st.warning(warning)
 
     except Exception as error:
         st.error(
