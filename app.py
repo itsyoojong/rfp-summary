@@ -328,6 +328,82 @@ if uploaded_file is not None:
 
             st.subheader("불일치 상세 내용")
             st.json(validation["issues"])
+            # 불일치 원인 확인
+            if validation["issues"]:
+            
+                for index, issue in enumerate(validation["issues"]):
+                
+                    field = issue["field"]
+                    page_number = issue["page"]
+
+                    with st.expander(
+                        f"{field} / PDF {page_number}페이지 상세 비교"
+                    ):
+
+                        # 1. AI가 반환한 후보와 인용문 확인
+                        st.write("AI가 추출한 정보")
+
+                        candidates = merged_result[field]["candidates"]
+
+                        for candidate in candidates:
+                        
+                            for source in candidate["sources"]:
+                            
+                                if source["page"] == page_number:
+                                
+                                    st.write("추출값:", candidate["value"])
+                                    st.write("AI 인용문:")
+                                    st.code(source["quote"])
+
+                        # 2. 실제 PDF 페이지 확인
+                        original_page = next(
+                            (
+                                page["text"]
+                                for page in pages
+                                if page["page_number"] == page_number
+                            ),
+                            None
+                        )
+
+                        if original_page is not None:
+                            # 실제 PDF 5페이지의 핵심 부분 확인
+                            if page_number == 5:
+                            
+                                st.write("PDF 5페이지 원문 확인")
+                            
+                                keyword = "제안요청서"
+                            
+                                position = original_page.find(keyword)
+                            
+                                if position != -1:
+                                    start = max(0, position - 100)
+                                    end = min(len(original_page), position + 400)
+                            
+                                    st.code(original_page[start:end])
+                            
+                                else:
+                                    st.code(original_page[:800])
+                            st.text_area(
+                                "실제 PDF에서 추출한 원문",
+                                value=original_page,
+                                height=250,
+                                key=f"debug_page_{index}"
+                            )
+                            # PDF 원문에서 사업명 근처의 내용 찾기
+                            keyword = "K-sure"
+
+                            position = original_page.find(keyword)
+
+                            if position != -1:
+                                start = max(0, position - 100)
+                                end = position + 200
+
+                                st.code(original_page[start:end])
+                            else:
+                                st.warning("해당 페이지에서 K-sure를 찾지 못했습니다.")
+
+                        else:
+                            st.warning("해당 PDF 페이지를 찾을 수 없습니다.")
 
             # 복수 후보 확인
             for field, entry in merged_result.items():
