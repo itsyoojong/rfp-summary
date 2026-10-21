@@ -10,6 +10,11 @@ from src.rfp_analyzer import (
     validate_budget_condition
 )
 
+from src.result_merger import merge_group_results
+from src.source_validator import validate_sources
+
+from src.value_validator import validate_budget_amount
+
 # from src.rfp_analyzer import (
 #     analyze_rfp_text,
 #     analyze_rfp_document
@@ -211,7 +216,9 @@ if uploaded_file is not None:
         else:
             st.success("모든 그룹 분석이 완료됐습니다.")
 
-        # 지금까지 저장된 분석 결과 출력
+
+
+        # 7. 그룹별 분석 결과 출력
         st.subheader("그룹별 분석 결과")
 
         for group_index in sorted(st.session_state.group_results):
@@ -234,6 +241,110 @@ if uploaded_file is not None:
 
                 for warning in warnings:
                     st.warning(warning)
+
+        # 8. 그룹별 결과 통합
+        st.divider()
+        st.subheader("통합 분석 결과")
+
+        if st.session_state.group_results:
+
+            merged_result = merge_group_results(
+                st.session_state.group_results
+            )
+
+            if completed < total_groups:
+                st.info(
+                    "아직 모든 페이지를 분석하지 않았습니다. "
+                    "현재까지의 중간 결과입니다."
+                )
+            else:
+                st.success("모든 그룹의 결과를 수집했습니다.")
+
+            st.json(merged_result)
+                        # 9. 사업비 금액 검증
+            st.subheader("사업비 금액 검증")
+
+            budget_warnings = validate_budget_amount(
+                merged_result
+            )
+
+            budget_candidates = merged_result.get(
+                "사업비", {}
+            ).get("candidates", [])
+
+            if not budget_candidates:
+                st.info("아직 사업비 데이터가 없습니다.")
+
+            elif budget_warnings:
+                for warning in budget_warnings:
+                    st.warning(warning)
+
+            elif any(
+                not candidate.get("sources")
+                for candidate in budget_candidates
+            ):
+                st.warning(
+                    "근거가 없는 사업비 후보가 있습니다."
+                )
+
+            else:
+                st.success(
+                    "사업비 금액 검증: 현재 비교 가능한 "
+                    "금액에서 불일치가 발견되지 않았습니다."
+                )
+            
+            # 원문 근거 검증
+            # validation = validate_sources(merged_result, pages)
+            # if validation["issues"]:
+            #     st.subheader("원문 불일치 상세 정보")
+            #     st.json(validation["issues"])
+
+            # st.subheader("원문 근거 검증 결과")
+
+            # st.write("검사한 인용문:", validation["checked"])
+            # st.write("원문 일치:", validation["matched"])
+            # st.write("확인 필요:", len(validation["issues"]))
+
+            # for issue in validation["issues"]:
+            #     st.warning(
+            #         f"{issue['field']} / "
+            #         f"{issue['page']}페이지: "
+            #         f"{issue['reason']}"
+            #     )
+            
+            validation = validate_sources(merged_result, pages)
+
+            st.subheader("원문 근거 검증")
+
+            # st.write("검사한 인용문:", validation["checked"])
+            # st.write("원문 일치:", validation["matched"])
+            # st.write("불일치 개수:", len(validation["issues"]))
+            st.write(
+                f"원문 근거 검증: "
+                f"{validation['checked']}개 중 "
+                f"{validation['matched']}개 일치, "
+                f"{len(validation['issues'])}개 확인 필요"
+            )
+
+            st.subheader("불일치 상세 내용")
+            st.json(validation["issues"])
+
+            # 복수 후보 확인
+            for field, entry in merged_result.items():
+
+                if len(entry["candidates"]) > 1:
+                    st.warning(
+                        f"{field}: 서로 다른 후보가 발견됐습니다. "
+                        "원문 확인이 필요합니다."
+                    )
+
+            st.caption(
+                "근거 인용문과 페이지 번호는 "
+                "아직 원본 PDF와 자동 대조하지 않았습니다."
+            )
+
+        else:
+            st.info("분석된 그룹이 아직 없습니다.")
 
     except Exception as error:
         st.error(
