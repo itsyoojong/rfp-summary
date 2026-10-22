@@ -2,7 +2,6 @@ import hashlib
 import streamlit as st
 from groq import APIStatusError
 
-
 from src.pdf_loader import extract_pdf_pages
 from src.rfp_analyzer import (
     analyze_rfp_text,
@@ -14,6 +13,13 @@ from src.result_merger import merge_group_results
 from src.source_validator import validate_sources
 
 from src.value_validator import validate_budget_amount
+
+from src.result_store import (
+    save_group_results,
+    load_group_results
+)
+
+CHUNK_SIZE = 3
 
 # from src.rfp_analyzer import (
 #     analyze_rfp_text,
@@ -86,11 +92,27 @@ if uploaded_file is not None:
     ).hexdigest()
 
     # 새로운 PDF면 이전 분석 결과 초기화
+    # if st.session_state.document_id != document_id:
+    #     st.session_state.document_id = document_id
+    #     st.session_state.page_results = {}
+    #     st.session_state.document_result = None
+    #     st.session_state.group_results = {}
     if st.session_state.document_id != document_id:
+
         st.session_state.document_id = document_id
         st.session_state.page_results = {}
         st.session_state.document_result = None
-        st.session_state.group_results = {}
+
+        try:
+            # 기존에 저장한 그룹 분석 결과 복원
+            st.session_state.group_results = load_group_results(
+                document_id,
+                CHUNK_SIZE
+            )
+
+        except (OSError, ValueError) as error:
+            st.error(f"저장된 분석 결과를 읽지 못했습니다: {error}")
+            st.stop()
 
     try:
         # 3. PDF 읽기
@@ -159,7 +181,7 @@ if uploaded_file is not None:
         st.subheader("그룹별 RFP 분석")
 
         # 3페이지씩 그룹 생성
-        chunk_size = 3
+        chunk_size = CHUNK_SIZE
 
         page_groups = [
             pages[i:i + chunk_size]
@@ -168,6 +190,23 @@ if uploaded_file is not None:
 
         total_groups = len(page_groups)
         completed = len(st.session_state.group_results)
+        
+        # 현재 세션의 결과를 수동 저장
+        if st.session_state.group_results:
+        
+            if st.button("현재 분석 결과 로컬 저장"):
+            
+                try:
+                    save_group_results(
+                        document_id,
+                        CHUNK_SIZE,
+                        st.session_state.group_results
+                    )
+        
+                    st.success("분석 결과가 로컬에 저장됐습니다.")
+        
+                except OSError as error:
+                    st.error(f"파일 저장 실패: {error}")
 
         # 진행 상황 표시
         st.write(f"분석 진행: {completed}/{total_groups}개 그룹")
@@ -196,9 +235,21 @@ if uploaded_file is not None:
                         )
 
                     # 분석 결과 저장
-                    st.session_state.group_results[
-                        next_index
-                    ] = result
+                    # st.session_state.group_results[
+                    #     next_index
+                    # ] = result
+
+                    # # 화면 갱신
+                    # st.rerun()
+                    # 분석 결과를 Session State에 저장
+                    st.session_state.group_results[next_index] = result
+
+                    # 분석 결과를 로컬 JSON 파일에도 저장
+                    save_group_results(
+                        document_id,
+                        CHUNK_SIZE,
+                        st.session_state.group_results
+                    )
 
                     # 화면 갱신
                     st.rerun()
@@ -370,17 +421,17 @@ if uploaded_file is not None:
                             if page_number == 5:
                             
                                 st.write("PDF 5페이지 원문 확인")
-                            
+
                                 keyword = "제안요청서"
-                            
+
                                 position = original_page.find(keyword)
-                            
+
                                 if position != -1:
                                     start = max(0, position - 100)
                                     end = min(len(original_page), position + 400)
-                            
+
                                     st.code(original_page[start:end])
-                            
+
                                 else:
                                     st.code(original_page[:800])
                             st.text_area(
