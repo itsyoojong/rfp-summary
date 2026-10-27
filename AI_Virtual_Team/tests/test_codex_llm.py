@@ -168,6 +168,31 @@ def test_failed_incomplete_or_tool_events_rejected(bad_events):
         CodexLLM._parse("\n".join(json.dumps(e) for e in bad_events).encode())
 
 
+@pytest.mark.parametrize("raw,reason", [
+    (b"secret-not-json", "EVENT_JSON_INVALID"),
+    (b'{"type":"secret-event-name"}', "EVENT_TYPE_UNKNOWN"),
+    (b'{"type":"turn.failed","error":"secret"}', "TURN_FAILED"),
+    (b'{"type":"item.completed","item":{"type":"command_execution"}}',
+     "ITEM_REJECTED:command_execution"),
+    (b'{"type":"item.completed","item":{"type":"secret-tool"}}', "ITEM_REJECTED:unknown"),
+    (b'{"type":"turn.started"}', "TURN_INCOMPLETE"),
+    (b'{"type":"turn.completed"}', "FINAL_MESSAGE_MISSING"),
+])
+def test_parse_diagnostics_are_specific_without_leaking_raw_data(raw, reason):
+    with pytest.raises(LLMError) as caught:
+        CodexLLM._parse(raw)
+    assert reason in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_validation_diagnostic_does_not_leak_unknown_field_names_or_values():
+    raw = "\n".join(json.dumps(e) for e in events('{"secret-field":"secret-value"}')).encode()
+    with pytest.raises(LLMError) as caught:
+        CodexLLM._parse(raw)
+    assert "OUTPUT_SCHEMA_INVALID:extra_forbidden,missing" in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
 async def test_cli_failure_never_leaks_stderr_or_falls_back(fake_cli):
     provider = CodexLLM(settings(codex_binary=fake_cli(
         "print('secret-token', file=sys.stderr)\nsys.exit(1)\n")))

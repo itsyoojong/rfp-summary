@@ -14,6 +14,8 @@ from importlib.resources import files
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from pydantic import ValidationError
+
 from .config import Settings
 from .llm import LLMError, LLMRateLimitError, strict_schema
 from .models import AgentInput, AgentOutput, Role
@@ -171,29 +173,55 @@ class CodexLLM:
         """Fail closed on tool events, incomplete turns, or non-contract output."""
         last_message = None
         completed = False
+        diagnostic = "STREAM_INVALID"
+        line_number = 0
+        # Only fixed diagnostic labels are exposed, never provider text, arbitrary
+        # field names, validation inputs, or stderr (all may contain secrets).
+        known_items = {"command_execution", "mcp_tool_call", "file_change", "web_search",
+                       "todo_list", "error", "agent_message", "reasoning"}
         try:
-            for line in raw.decode("utf-8").splitlines():
+            for line_number, line in enumerate(raw.decode("utf-8").splitlines(), 1):
+                diagnostic = "EVENT_JSON_INVALID"
                 event = json.loads(line)
+                diagnostic = "EVENT_SHAPE_INVALID"
                 kind = event["type"]
                 if completed:
+                    diagnostic = "EVENT_AFTER_COMPLETION"
                     raise ValueError("event after completion")
                 if kind in {"item.started", "item.updated", "item.completed"}:
                     item = event["item"]
                     if item["type"] not in {"agent_message", "reasoning"}:
+                        name = item["type"] if item["type"] in known_items else "unknown"
+                        diagnostic = "ITEM_REJECTED:" + name
                         raise ValueError("unexpected tool or item")
                     if kind == "item.completed" and item["type"] == "agent_message":
                         last_message = item["text"]
                 elif kind == "turn.completed":
                     completed = True
                 elif kind not in {"thread.started", "turn.started"}:
+                    diagnostic = {"error": "PROVIDER_ERROR_EVENT", "turn.failed": "TURN_FAILED"}.get(
+                        kind, "EVENT_TYPE_UNKNOWN")
                     raise ValueError("unexpected or failed event")
             if not completed or not isinstance(last_message, str):
+                diagnostic = "TURN_INCOMPLETE" if not completed else "FINAL_MESSAGE_MISSING"
                 raise ValueError("incomplete turn")
+            diagnostic = "FINAL_MESSAGE_ENCODING"
             if len(last_message.encode("utf-8")) > cls.MAX_RESPONSE_BYTES:
+                diagnostic = "FINAL_MESSAGE_TOO_LARGE"
                 raise ValueError("oversize response")
+            diagnostic = "OUTPUT_SCHEMA_INVALID"
             return AgentOutput.model_validate_json(last_message)
+        except ValidationError as exc:
+            labels = {"json_invalid", "missing", "extra_forbidden", "literal_error",
+                      "string_too_long", "string_too_short", "too_long", "too_short",
+                      "string_type", "list_type", "model_type", "int_parsing"}
+            categories = sorted({e["type"] if e["type"] in labels else "other"
+                                 for e in exc.errors(include_input=False, include_context=False)})
+            raise LLMError("Codex 출력 검증 실패 [OUTPUT_SCHEMA_INVALID:" + ",".join(categories)
+                           + "]. 원문과 비밀 값은 표시하지 않습니다.") from None
         except (UnicodeError, ValueError, KeyError, TypeError):
-            raise LLMError("Codex가 도구 사용 없는 유효한 AgentOutput JSON을 반환하지 않았습니다.") from None
+            raise LLMError(f"Codex 출력 검증 실패 [{diagnostic}; line={line_number}]. "
+                           "원문과 비밀 값은 표시하지 않습니다.") from None
 
     async def generate(self, request: AgentInput) -> AgentOutput:
         request = AgentInput.model_validate(request.model_dump())

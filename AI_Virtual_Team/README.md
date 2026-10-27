@@ -277,3 +277,5 @@ Notion은 [현재 버전](https://developers.notion.com/reference/versioning), [
 `PYTHONPATH="$PWD/src" .venv/bin/python -m ai_virtual_team codex-smoke`를 프로젝트 폴더에서 실행합니다. 가상 안건으로 PM 의제 생성만 한 번 요청하며 ChatGPT 계정 사용량이 발생합니다. DB나 GitHub·Discord·Notion 연결을 사용하지 않고, 프로젝트 생성·승인도 하지 않습니다. 성공 시 `inference_verified: true`, `scope: PM agenda only`를 출력합니다. 이 결과는 5단계 회의 전체나 실제 도구 차단 검증 완료를 뜻하지 않습니다. 실패하면 재시도나 Mock 대체 없이 종료합니다.
 
 2026-10-27 작업 환경에서 실제 추론을 시도했으나 Codex 내부 app-server 초기화가 `Operation not permitted`로 실패했습니다. 로그인 확인 성공과 추론 성공을 구분해야 하며, 사용자 터미널에서의 결과는 아직 미확인입니다.
+
+`codex-smoke`의 출력 검증이 실패하면 대괄호 안의 진단 코드를 확인합니다. `ITEM_REJECTED`는 허용하지 않는 도구/항목, `TURN_INCOMPLETE`는 완료 이벤트 누락, `FINAL_MESSAGE_MISSING`은 최종 메시지 누락, `OUTPUT_SCHEMA_INVALID`는 JSON 또는 Pydantic 계약 위반입니다. 알 수 없는 이벤트는 `EVENT_TYPE_UNKNOWN`으로 거절합니다. 오류 코드와 행 번호만으로 진단을 요청할 수 있으며 응답 원문이나 인증 파일을 공유할 필요는 없습니다.
