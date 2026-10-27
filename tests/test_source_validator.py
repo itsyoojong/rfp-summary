@@ -103,3 +103,36 @@ warnings = validate_budget_amount(merged)
 assert len(warnings) == 0
 
 print("테스트 7 통과: 금액 일치")
+
+# 테스트 8: 존재하는 페이지를 잘못 지정한 경우
+
+wrong_source_page = deepcopy(merged)
+
+# AI가 근거 페이지를 5페이지라고 잘못 지정
+wrong_source_page["사업비"]["candidates"][0]["sources"][0]["page"] = 5
+
+# 테스트용 PDF에 5페이지 추가
+test_pages = pages + [
+    {
+        "page_number": 5,
+        "text": "본 페이지에는 다른 사업 관련 내용이 있습니다."
+    }
+]
+
+# 근거 검증 실행
+result = validate_sources(
+    wrong_source_page,
+    test_pages
+)
+
+print("검증 결과:", result)
+
+assert result["matched"] == 0
+
+assert result["issues"][0]["reason"] == (
+    "인용문이 다른 페이지에서 발견됨"
+)
+
+assert result["issues"][0]["actual_pages"] == [3]
+
+print("테스트 8 통과: 실제 근거 페이지 탐지")
