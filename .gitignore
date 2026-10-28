@@ -13,4 +13,4 @@ venv/
 .env.*
 
 # macOS에서 생성하는 파일
-.DS_Store
+.DS_StoreAI_Virtual_Team/
