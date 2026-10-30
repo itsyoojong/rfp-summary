@@ -14,10 +14,15 @@
     "vat_included": true,
     "reviewed": true
   },
+
   "사업목적": {
-    "value": "디자인 및 메뉴 구성 개선을 통한 사용자 인터페이스 강화와 사용자 중심 콘텐츠 제공을 통한 이용 편의성 및 정보 제공 강화",
-    "reviewed": true
-  },
+  "value": "디자인 및 메뉴 구성 개선을 통한 사용자 인터페이스 강화와 사용자 중심 콘텐츠 제공을 통한 이용 편의성 및 정보 제공 강화",
+  "reviewed": true,
+  "manual_evaluation": {
+    "correct": true,
+    "reason": "원문의 두 가지 핵심 사업목적이 모두 유지됨"
+  }
+},
   "제출기한": {
     "value": "‘12.3.12(월)15시",
     "reviewed": true

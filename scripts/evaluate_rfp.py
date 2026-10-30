@@ -4,10 +4,12 @@ import json
 import re
 from pathlib import Path
 
+
 from src.pdf_loader import extract_pdf_pages
 from src.result_merger import merge_group_results
 from src.source_validator import validate_sources
 from src.value_validator import parse_krw_amount
+from src.candidate_resolver import resolve_candidates
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -118,6 +120,9 @@ def main():
         raise ValueError("분석 그룹이 누락되었거나 번호가 잘못됐습니다.")
 
     merged = merge_group_results(group_results)
+    # 기존 후보 통합 결과에 새 후보 선택 알고리즘 적용
+    # 베이스라인은 변경하지 않고 개선 후 결과를 별도로 평가한다.
+    resolved = resolve_candidates(merged, pages)
 
     # 3. 사람이 작성한 정답 읽기
     gold = json.loads(
@@ -203,25 +208,113 @@ def main():
                 strict_matches += int(score)
                 status = "일치" if score else "불일치 또는 복수 후보"
 
+        # field_results[field] = {
+        #     "status": status,
+        #     "predictions": values
+        # }
+
+        # print(f"{field}: {status}")
+        # print(f"  AI 추출값: {values}")
+        
+        # 기존 평가 결과와 개선된 후보 선택 결과를 모두 기록한다.
+        decision = resolved[field]
+
         field_results[field] = {
             "status": status,
-            "predictions": values
+            "predictions": values,
+            "resolved_status": decision["status"],
+            "selected": decision["selected"]
         }
 
-        print(f"{field}: {status}")
-        print(f"  AI 추출값: {values}")
+        # 최종 선택 결과를 우선 표시한다.
+        if field in ("사업명", "사업기간", "사업비"):
+        
+            print(f"{field}: {decision['status']}")
+            print(f"  최종 선택값: {decision['selected']}")
 
+            # 여러 후보가 있었던 경우에만 검증용 정보 표시
+            if len(values) > 1:
+                print(f"  통합 전 후보 수: {len(values)}")
+
+        else:
+            # 사업목적의 수동 평가와 제출기한의 미확인 상태는 별도 표시
+            print(f"{field}: {status}")
+            print(f"  추출값: {values}")
+
+        # 4-1. 후보 선택 알고리즘 적용 후 정확도 평가
+    resolved_matched = 0
+    resolved_total = 0
+
+    print("\n--- 후보 선택 알고리즘 평가 ---")
+
+    for field, answer in gold.items():
+
+        # 검토하지 않은 항목과 사업목적은 자동 평가에서 제외
+        if not answer.get("reviewed") or field == "사업목적":
+            continue
+
+        selected = resolved[field]["selected"]
+        expected = answer.get("value")
+
+        # 원문에 정보가 없는 경우
+        if expected is None:
+            # 후보 자체가 없어야 올바른 미추출로 인정
+            correct = len(merged[field]["candidates"]) == 0
+
+        # 대표값을 선택하지 못한 경우
+        elif selected is None:
+            correct = False
+
+        # 사업비는 금액·VAT·상한 조건으로 평가
+        elif field == "사업비":
+            correct = check_budget(selected, answer)
+
+        # 나머지는 기존 문자열 정규화 방식으로 평가
+        else:
+            correct = normalize(selected) == normalize(expected)
+
+        # 자동 판단 불가능한 경우 분모에서 제외
+        if correct is None:
+            print(f"{field}: 평가 보류")
+            continue
+
+        resolved_total += 1
+        resolved_matched += int(correct)
+
+        result = "PASS" if correct else "FAIL"
+
+        print(f"{field}: {result}")
+        print(f"  선택값: {selected}")
+
+    print(
+        f"\n후보 선택 후 자동 일치: "
+        f"{resolved_matched}/{resolved_total}"
+    )
+    
     # 5. 원문 근거 검증
     sources = validate_sources(merged, pages)
 
-    print("\n--- 베이스라인 평가 결과 ---")
-    print(f"자동 평가: {strict_matches}/{strict_total}")
-    print(f"후보 탐지: {candidate_matched}/{candidate_total}")
-    print(f"수동 의미 평가: {manual_matches}/{manual_total}")
-    print(
-        f"근거 일치: {sources['matched']}/"
-        f"{sources['checked']}"
-    )
+    # print("\n--- 베이스라인 평가 결과 ---")
+    # print(f"자동 평가: {strict_matches}/{strict_total}")
+    # print(f"후보 탐지: {candidate_matched}/{candidate_total}")
+    # print(f"수동 의미 평가: {manual_matches}/{manual_total}")
+    # print(
+    #     f"근거 일치: {sources['matched']}/"
+    #     f"{sources['checked']}"
+    # )
+    
+    # print("\n--- 평가 결과 비교 ---")
+
+    # 기존 후보 병합 결과
+    print(f"기존 자동 평가: "f"{strict_matches}/{strict_total}")
+    # 새 후보 선택 알고리즘 적용 결과
+    print(f"개선 후 자동 평가: "f"{resolved_matched}/{resolved_total}")
+    # 후보 탐지
+    print(f"후보 탐지: "f"{candidate_matched}/{candidate_total}")
+    # 사업목적 의미 평가
+    print(f"수동 의미 평가: "f"{manual_matches}/{manual_total}")
+    # 인용문 검증
+    print(f"근거 일치: "f"{sources['matched']}/{sources['checked']}")
 
     # 6. 평가 보고서 저장
     report = {
@@ -242,11 +335,15 @@ def main():
             "matched": candidate_matched,
             "total": candidate_total
         },
+        "resolved_auto": {
+        "matched": resolved_matched,
+        "total": resolved_total
+        }
     }
 
     output = (
         ROOT / "data" / "evaluation"
-        / f"{pdf_path.stem}_baseline_v1_eval_v2_report.json"
+        / f"{pdf_path.stem}_baseline_v1_eval_v3_report.json"
     )
     
 

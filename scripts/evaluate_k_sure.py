@@ -64,6 +64,8 @@ def main():
 
     field_results = {}
     strict_matched = 0
+    manual_matched = 0
+    manual_total = 0
 
     # 3. 항목별 평가
     for field, answer in gold.items():
@@ -80,8 +82,23 @@ def main():
         elif len(values) > 1:
             status = "복수 후보 - 수동 검토 필요"
 
+        # elif field == "사업목적":
+        #     status = "의미 평가 필요"
         elif field == "사업목적":
-            status = "의미 평가 필요"
+            review = answer.get("manual_evaluation", {})
+            correct = review.get("correct")
+
+            if isinstance(correct, bool):
+                manual_total += 1
+                manual_matched += int(correct)
+
+                status = (
+                    "수동 평가 일치"
+                    if correct
+                    else "수동 평가 불일치"
+                )
+            else:
+                status = "의미 평가 필요"
 
         elif field == "사업비":
             correct = check_budget(values[0], answer)
@@ -117,6 +134,7 @@ def main():
         f"근거 일치: {source_result['matched']}/"
         f"{source_result['checked']}개 인용문"
     )
+    print(f"수동 의미 평가: {manual_matched}/{manual_total}개 항목")
 
     # 5. 평가 보고서 저장
     report = {
@@ -124,7 +142,9 @@ def main():
 
         "strict_auto_total": strict_total,
         "fields": field_results,
-        "source_validation": source_result
+        "source_validation": source_result,
+        "manual_matches": manual_matched,
+        "manual_total": manual_total,
     }
 
     output = ROOT / "data" / "evaluation" / "k_sure_report.json"

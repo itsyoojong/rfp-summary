@@ -11,13 +11,12 @@ from src.rfp_analyzer import (
 
 from src.result_merger import merge_group_results
 from src.source_validator import validate_sources
-
 from src.value_validator import validate_budget_amount
-
 from src.result_store import (
     save_group_results,
     load_group_results
 )
+from src.candidate_resolver import resolve_candidates
 
 CHUNK_SIZE = 3
 
@@ -202,9 +201,9 @@ if uploaded_file is not None:
                         CHUNK_SIZE,
                         st.session_state.group_results
                     )
-        
+
                     st.success("분석 결과가 로컬에 저장됐습니다.")
-        
+
                 except OSError as error:
                     st.error(f"파일 저장 실패: {error}")
 
@@ -298,10 +297,21 @@ if uploaded_file is not None:
         st.subheader("통합 분석 결과")
 
         if st.session_state.group_results:
+            # 1. 그룹별 분석 결과를 하나로 병합
 
             merged_result = merge_group_results(
                 st.session_state.group_results
             )
+
+            # 2. 병합된 후보에서 최종 대표값 선택
+            resolved_result = resolve_candidates(
+                merged_result,
+                pages
+            )
+            #st.info("디버깅: 새로운 후보 선택 알고리즘 실행됨")
+
+            #st.write("사업명 선택:", resolved_result["사업명"]["selected"])
+            #st.write("사업기간 선택:", resolved_result["사업기간"]["selected"])
 
             if completed < total_groups:
                 st.info(
@@ -311,7 +321,24 @@ if uploaded_file is not None:
             else:
                 st.success("모든 그룹의 결과를 수집했습니다.")
 
-            st.json(merged_result)
+            #st.json(merged_result)
+            
+            # 사용자에게 대표값과 판단 상태를 우선 표시
+            final_results = {
+                field: {
+                    "status": result["status"],
+                    "selected": result["selected"]
+                }
+                for field, result in resolved_result.items()
+            }
+
+            st.json(final_results)
+
+            # 원래 후보 목록은 상세 검증용으로 보존
+            with st.expander("전체 추출 후보 확인"):
+                st.json(merged_result)
+            
+            
                         # 9. 사업비 금액 검증
             st.subheader("사업비 금액 검증")
 
@@ -457,12 +484,38 @@ if uploaded_file is not None:
                             st.warning("해당 PDF 페이지를 찾을 수 없습니다.")
 
             # 복수 후보 확인
-            for field, entry in merged_result.items():
+            # for field, entry in merged_result.items():
 
-                if len(entry["candidates"]) > 1:
+            #     if len(entry["candidates"]) > 1:
+            #         st.warning(
+            #             f"{field}: 서로 다른 후보가 발견됐습니다. "
+            #             "원문 확인이 필요합니다."
+            #         )
+                # 복수 후보 중 최종 대표값을 선택했는지 확인
+            for field, entry in merged_result.items():
+            
+                candidate_count = len(entry["candidates"])
+
+                # 후보가 하나 이하이면 복수 후보 경고가 필요하지 않음
+                if candidate_count <= 1:
+                    continue
+                
+                decision = resolved_result[field]
+
+                if decision["selected"] is not None:
+                
+                    # 대표값 선택에 성공한 경우
+                    st.info(
+                        f"{field}: 후보 {candidate_count}개 중 "
+                        "대표값 선택을 완료했습니다."
+                    )
+
+                else:
+                
+                    # 여전히 대표값을 결정하지 못한 경우
                     st.warning(
-                        f"{field}: 서로 다른 후보가 발견됐습니다. "
-                        "원문 확인이 필요합니다."
+                        f"{field}: 후보 {candidate_count}개가 발견됐지만 "
+                        "대표값을 확정하지 못했습니다. 원문 검토가 필요합니다."
                     )
 
             st.caption(
