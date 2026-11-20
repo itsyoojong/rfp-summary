@@ -13,4 +13,19 @@ venv/
 .env.*
 
 # macOS에서 생성하는 파일
-.DS_StoreAI_Virtual_Team/
+
+# macOS 및 별도 프로젝트
+.DS_Store
+AI_Virtual_Team/
+
+# 배포 비밀 설정
+.streamlit/secrets.toml
+*.pem
+*.key
+
+# 사용자 문서 및 로컬 평가 산출물 (기준 답안 evaluation/*_gold.json은 유지)
+*.pdf
+cache/
+baselines/
+reports/
+*_report.json

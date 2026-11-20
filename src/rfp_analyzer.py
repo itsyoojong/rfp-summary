@@ -6,6 +6,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from groq import Groq
 
+from src.diagnostics import AnalysisError, analysis_stage, log_failure
+
 # 프로젝트 루트의 .env 파일 읽기
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env")
@@ -15,15 +17,7 @@ def analyze_rfp_text(page_text: str) -> dict:
 
     # 입력 텍스트 확인
     if not page_text.strip():
-        raise ValueError("분석할 텍스트가 없습니다.")
-
-    # API 키 확인
-    api_key = os.getenv("GROQ_API_KEY")
-
-    if not api_key:
-        raise ValueError("GROQ_API_KEY가 설정되지 않았습니다.")
-
-    client = Groq(api_key=api_key)
+        raise AnalysisError("no_text")
 
     # 프롬프트 구성
     prompt = f"""
@@ -48,48 +42,25 @@ def analyze_rfp_text(page_text: str) -> dict:
     </document>
     """
 
-    # Groq API 요청
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        response_format={"type": "json_object"},
-        reasoning_effort="low"
-    )
+    response = _request(prompt, page_count=1, input_chars=len(page_text))
+    return _parse_response(response, structured=False)
 
-    # JSON 문자열을 딕셔너리로 변환
-    result = json.loads(
-        response.choices[0].message.content
-    )
 
-    if not isinstance(result, dict):
-        raise ValueError("JSON 객체가 반환되지 않았습니다.")
+def analyze_rfp_document(pages: list[dict], *, group_number=None) -> dict:
 
-    return result
+    with analysis_stage("analysis_input", group_number=group_number):
+        if not pages:
+            raise AnalysisError("no_pages")
 
-def analyze_rfp_document(pages: list[dict]) -> dict:
+        # 1. 모든 페이지를 하나의 문자열로 연결
+        document_text = "\n\n".join(
+            f"[PDF {page['page_number']}페이지]\n{page['text']}"
+            for page in pages
+            if page["text"].strip()
+        )
 
-    if not pages:
-        raise ValueError("분석할 페이지가 없습니다.")
-
-    # 1. 모든 페이지를 하나의 문자열로 연결
-    document_text = "\n\n".join(
-        f"[PDF {page['page_number']}페이지]\n{page['text']}"
-        for page in pages
-        if page["text"].strip()
-    )
-
-    if not document_text:
-        raise ValueError("추출된 텍스트가 없습니다.")
-
-    # 2. API 키 불러오기
-    api_key = os.getenv("GROQ_API_KEY")
-
-    if not api_key:
-        raise ValueError("Groq API 키가 없습니다.")
-
-    client = Groq(api_key=api_key)
+        if not document_text:
+            raise AnalysisError("no_text")
 
     # 3. 전체 문서 분석 프롬프트
     prompt = f"""
@@ -145,28 +116,77 @@ def analyze_rfp_document(pages: list[dict]) -> dict:
     </document>
     """
 
-    # 4. Groq API 호출
-    response = client.chat.completions.create(
-        model="openai/gpt-oss-20b",
-        messages=[
-            {"role": "user", "content": prompt}
-        ],
-        response_format={"type": "json_object"},
-        reasoning_effort="low"
-    )
+    metadata = {
+        "group_number": group_number,
+        "page_count": len(pages),
+        "page_start": pages[0]["page_number"],
+        "page_end": pages[-1]["page_number"],
+        "input_chars": len(document_text),
+    }
+    response = _request(prompt, **metadata)
+    return _parse_response(response, **metadata)
 
-    # 5. JSON 문자열을 Python 딕셔너리로 변환
-    raw_text = response.choices[0].message.content
 
-    if not raw_text:
-        raise ValueError("모델 응답이 비어 있습니다.")
+def _request(prompt, **metadata):
+    with analysis_stage("groq_request", **metadata):
+        api_key = os.getenv("GROQ_API_KEY", "").strip()
+        if not api_key:
+            raise AnalysisError("missing_api_key")
+        client = Groq(api_key=api_key)
+        return client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            reasoning_effort="low"
+        )
 
-    result = json.loads(raw_text)
 
-    if not isinstance(result, dict):
-        raise ValueError("JSON 객체가 반환되지 않았습니다.")
+def _parse_response(response, structured=True, **metadata):
+    with analysis_stage("llm_response", **metadata):
+        if not response.choices:
+            raise AnalysisError("empty_response")
+        choice = response.choices[0]
+        if choice.finish_reason == "length":
+            raise AnalysisError("truncated_response")
+        raw_text = choice.message.content
+        if not isinstance(raw_text, str) or not raw_text.strip():
+            raise AnalysisError("empty_response")
 
+    with analysis_stage("json_parse", **metadata):
+        # JSONDecodeError 타입과 위치는 보존하되, 원문 응답은 기록하지 않는다.
+        try:
+            result = json.loads(raw_text)
+        except json.JSONDecodeError as error:
+            log_failure("json_parse", error, **metadata)
+            failure = AnalysisError("invalid_json")
+            failure._rfp_logged = True
+            raise failure from error
+
+    with analysis_stage("response_validation", **metadata):
+        if not isinstance(result, dict):
+            raise AnalysisError("invalid_schema")
+        if structured:
+            validate_analysis_result(result)
     return result
+
+
+def validate_analysis_result(result):
+    fields = ("사업명", "사업기간", "사업비", "사업목적", "제출기한")
+    if not isinstance(result, dict) or any(field not in result for field in fields):
+        raise AnalysisError("invalid_schema")
+    for field in fields:
+        entry = result[field]
+        if not isinstance(entry, dict) or "value" not in entry or "sources" not in entry:
+            raise AnalysisError("invalid_schema")
+        if entry["value"] is not None and not isinstance(entry["value"], str):
+            raise AnalysisError("invalid_schema")
+        if not isinstance(entry["sources"], list):
+            raise AnalysisError("invalid_schema")
+        for source in entry["sources"]:
+            if (not isinstance(source, dict)
+                or type(source.get("page")) is not int or source["page"] < 1
+                or not isinstance(source.get("quote"), str)):
+                raise AnalysisError("invalid_schema")
 
 
 def validate_budget_condition(result: dict) -> list[str]:

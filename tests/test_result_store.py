@@ -1,46 +1,39 @@
+import json
+import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from src.result_store import (
-    save_group_results,
-    load_group_results
-)
+from src.result_store import get_cache_path, load_group_results, save_group_results
 
-# 테스트용 문서 ID와 분석 결과
-document_id = "a" * 64
 
-sample_results = {
-    0: {
-        "사업명": {
-            "value": "K-sure 홈페이지 개편",
-            "sources": []
-        }
-    }
-}
+class TestResultStore(unittest.TestCase):
+    def setUp(self):
+        directory = TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        mock = patch("src.result_store.CACHE_DIR", Path(directory.name))
+        mock.start()
+        self.addCleanup(mock.stop)
+        self.document_id = "a" * 64
 
-# 실제 프로젝트 파일을 건드리지 않도록 임시 폴더 사용
-with TemporaryDirectory() as temp_dir:
+    def test_json_roundtrip_restores_integer_keys(self):
+        results = {0: {"사업명": {"value": "테스트", "sources": []}}}
+        save_group_results(self.document_id, 3, results)
+        self.assertEqual(load_group_results(self.document_id, 3), results)
 
-    with patch(
-        "src.result_store.CACHE_DIR",
-        Path(temp_dir)
-    ):
+    def test_missing_cache(self):
+        self.assertEqual(load_group_results(self.document_id, 3), {})
 
-        # 저장
-        save_group_results(
-            document_id,
-            3,
-            sample_results
-        )
+    def test_invalid_identity_and_chunk_size(self):
+        for identity, size in (("../invalid", 3), (self.document_id, 0)):
+            with self.assertRaises(ValueError):
+                get_cache_path(identity, size)
 
-        # 다시 불러오기
-        loaded = load_group_results(
-            document_id,
-            3
-        )
-
-        assert loaded == sample_results
-        assert 0 in loaded
-
-        print("테스트 통과: JSON 저장 및 복원")
+    def test_invalid_cache_metadata_and_noncontiguous_groups(self):
+        for data in ({"version": "wrong"}, {
+            "version": "v1", "document_id": self.document_id,
+            "chunk_size": 3, "group_results": {"1": {}}
+        }):
+            get_cache_path(self.document_id, 3).write_text(json.dumps(data))
+            with self.assertRaises(ValueError):
+                load_group_results(self.document_id, 3)

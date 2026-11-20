@@ -1,37 +1,21 @@
 import hashlib
 import streamlit as st
-from groq import APIStatusError
 
 from src.pdf_loader import extract_pdf_pages
 from src.rfp_analyzer import (
-    analyze_rfp_text,
     analyze_rfp_document,
-    validate_budget_condition
+    validate_budget_condition,
+    validate_analysis_result
 )
 
 from src.result_merger import merge_group_results
 from src.source_validator import validate_sources
 from src.value_validator import validate_budget_amount
-from src.result_store import (
-    save_group_results,
-    load_group_results
-)
+from src.session_results import disk_cache_enabled, set_document, persist_groups
 from src.candidate_resolver import resolve_candidates
+from src.diagnostics import analysis_stage, log_failure, user_message
 
 CHUNK_SIZE = 3
-
-# from src.rfp_analyzer import (
-#     analyze_rfp_text,
-#     analyze_rfp_document
-# )
-# import streamlit as st
-# from src.pdf_loader import extract_pdf_pages
-# import os
-# import json
-# from pathlib import Path
-# from dotenv import load_dotenv
-# from groq import Groq
-
 
 st.set_page_config(
     page_title="RFP Insight",
@@ -39,45 +23,20 @@ st.set_page_config(
 )
 
 st.title("RFP Insight")
-st.write("AI 기반 제안요청서 분석 서비스")  
+st.write("AI 기반 제안요청서 분석 서비스")
 
+st.caption(
+    "분석 시 선택한 페이지의 텍스트가 Groq API로 전송됩니다. "
+    "전송이 허용된 문서만 업로드하세요."
+)
+if disk_cache_enabled():
+    st.warning("로컬 디스크 캐시가 활성화되어 있습니다. 서버에 분석 결과가 저장·복원됩니다.")
+else:
+    st.caption(
+        "분석 결과는 현재 세션에서만 유지하며 앱의 디스크 캐시에 저장·복원하지 않습니다. "
+        "세션 종료 후에는 결과가 유지되지 않을 수 있습니다."
+    )
 
-
-
-
-
-# # 프로젝트 폴더의 .env 파일 불러오기
-# load_dotenv(Path(__file__).resolve().parent / ".env")
-# # 웹페이지 기본 설정
-# st.set_page_config(
-#     page_title="RFP Insight",
-#     page_icon="📄",
-#     layout="wide"
-# )
-
-# st.title("RFP Insight")
-# st.write("AI 기반 제안요청서 분석 서비스")
-
-# # PDF 파일 업로드
-# uploaded_file = st.file_uploader(
-#     "분석할 RFP 문서를 업로드하세요.",
-#     type=["pdf"]
-# )
-
-# 1. Session State 초기화
-if "document_id" not in st.session_state:
-    st.session_state.document_id = None
-
-if "page_results" not in st.session_state:
-    st.session_state.page_results = {}
-
-if "document_result" not in st.session_state:
-    st.session_state.document_result = None
-    
-if "group_results" not in st.session_state:
-    st.session_state.group_results = {}
-
-# 2. PDF 업로드
 uploaded_file = st.file_uploader(
     "분석할 PDF 파일을 업로드하세요.",
     type=["pdf"]
@@ -85,43 +44,33 @@ uploaded_file = st.file_uploader(
 
 if uploaded_file is not None:
 
-    # PDF 파일 내용으로 식별값 생성
-    document_id = hashlib.sha256(
-        uploaded_file.getvalue()
-    ).hexdigest()
-
-    # 새로운 PDF면 이전 분석 결과 초기화
-    # if st.session_state.document_id != document_id:
-    #     st.session_state.document_id = document_id
-    #     st.session_state.page_results = {}
-    #     st.session_state.document_result = None
-    #     st.session_state.group_results = {}
-    if st.session_state.document_id != document_id:
-
-        st.session_state.document_id = document_id
-        st.session_state.page_results = {}
-        st.session_state.document_result = None
-
-        try:
-            # 기존에 저장한 그룹 분석 결과 복원
-            st.session_state.group_results = load_group_results(
-                document_id,
-                CHUNK_SIZE
-            )
-
-        except (OSError, ValueError) as error:
-            st.error(f"저장된 분석 결과를 읽지 못했습니다: {error}")
-            st.stop()
+    try:
+        with analysis_stage("upload_read"):
+            document_id = hashlib.sha256(uploaded_file.getvalue()).hexdigest()
+    except Exception as error:
+        st.error(user_message(error))
+        st.stop()
 
     try:
-        # 3. PDF 읽기
-        uploaded_file.seek(0)
-        pages = extract_pdf_pages(uploaded_file)
+        with analysis_stage("cache_restore"):
+            set_document(st.session_state, document_id, CHUNK_SIZE)
+    except (OSError, ValueError):
+        st.warning("로컬 캐시를 읽지 못했습니다. 현재 세션에서 새로 분석할 수 있습니다.")
+
+    stage = "pdf_extract"
+    metadata = {}
+    try:
+        with analysis_stage(stage):
+            uploaded_file.seek(0)
+            pages = extract_pdf_pages(uploaded_file)
+        metadata = {"page_count": len(pages)}
+        if not pages:
+            st.warning("분석할 PDF 페이지가 없습니다.")
+            st.stop()
 
         st.success("PDF 파일을 읽었습니다.")
         st.write("전체 페이지:", len(pages))
 
-        # 4. 페이지 선택
         selected_page = st.selectbox(
             "확인할 페이지를 선택하세요.",
             options=range(1, len(pages) + 1)
@@ -137,66 +86,58 @@ if uploaded_file is not None:
                 height=300
             )
 
-            # 5. 개별 페이지 분석
             if st.button("AI 분석 시작"):
 
                 try:
+                    stage = "page_analysis"
                     with st.spinner("분석 중입니다."):
                         result = analyze_rfp_document([pages[selected_page - 1]])
-                        #result = analyze_rfp_text(page_text)
 
-                    # 결과를 해당 페이지 번호로 저장
-                    st.session_state.page_results[
-                        selected_page
-                    ] = result
+                    with analysis_stage("session_save", page_start=selected_page, page_end=selected_page):
+                        validate_analysis_result(result)
+                        st.session_state.page_results[selected_page] = result
 
                 except Exception as error:
-                    st.error(
-                        f"분석 실패: {type(error).__name__}"
-                    )
+                    log_failure(stage, error, **metadata)
+                    st.error(user_message(error))
 
-            # 저장된 분석 결과 표시
             if selected_page in st.session_state.page_results:
 
                 result = st.session_state.page_results[selected_page]
-                
+
                 st.subheader("페이지 분석 결과")
                 st.json(result)
-                
+
                 warnings = validate_budget_condition(result)
                 for warning in warnings:
                     st.warning(warning)
 
-                #st.json(
-                #    st.session_state.page_results[selected_page]
-                #)
-
         else:
             st.warning("텍스트를 추출하지 못했습니다.")
 
-
-        # 6. 그룹별 문서 분석
         st.divider()
         st.subheader("그룹별 RFP 분석")
 
-        # 3페이지씩 그룹 생성
         chunk_size = CHUNK_SIZE
 
+        stage = "group_creation"
         page_groups = [
             pages[i:i + chunk_size]
             for i in range(0, len(pages), chunk_size)
         ]
 
+        if st.session_state.pop("cache_save_failed", False):
+            st.warning("로컬 캐시 저장에 실패했습니다. 세션 결과는 유지됩니다.")
+
         total_groups = len(page_groups)
         completed = len(st.session_state.group_results)
-        
-        # 현재 세션의 결과를 수동 저장
-        if st.session_state.group_results:
-        
+
+        if disk_cache_enabled() and st.session_state.group_results:
+
             if st.button("현재 분석 결과 로컬 저장"):
-            
+
                 try:
-                    save_group_results(
+                    persist_groups(
                         document_id,
                         CHUNK_SIZE,
                         st.session_state.group_results
@@ -205,13 +146,12 @@ if uploaded_file is not None:
                     st.success("분석 결과가 로컬에 저장됐습니다.")
 
                 except OSError as error:
-                    st.error(f"파일 저장 실패: {error}")
+                    log_failure("cache_save", error, **metadata)
+                    st.error("로컬 캐시 저장에 실패했습니다. 세션 결과는 유지됩니다.")
 
-        # 진행 상황 표시
         st.write(f"분석 진행: {completed}/{total_groups}개 그룹")
         st.progress(completed / total_groups)
 
-        # 아직 분석하지 않은 그룹이 있다면
         if completed < total_groups:
 
             next_index = completed
@@ -227,48 +167,34 @@ if uploaded_file is not None:
             if st.button("다음 그룹 분석"):
 
                 try:
+                    stage = "group_analysis"
+                    metadata = {"page_count": len(pages), "group_number": next_index + 1,
+                                "page_start": start_page, "page_end": end_page}
                     with st.spinner("Groq 분석 중입니다."):
 
                         result = analyze_rfp_document(
-                            current_group
+                            current_group, group_number=next_index + 1
                         )
 
-                    # 분석 결과 저장
-                    # st.session_state.group_results[
-                    #     next_index
-                    # ] = result
+                    with analysis_stage("session_save", **metadata):
+                        validate_analysis_result(result)
+                        st.session_state.group_results[next_index] = result
 
-                    # # 화면 갱신
-                    # st.rerun()
-                    # 분석 결과를 Session State에 저장
-                    st.session_state.group_results[next_index] = result
+                    try:
+                        persist_groups(document_id, CHUNK_SIZE, st.session_state.group_results)
+                    except OSError as error:
+                        log_failure("cache_save", error, **metadata)
+                        st.session_state["cache_save_failed"] = True
 
-                    # 분석 결과를 로컬 JSON 파일에도 저장
-                    save_group_results(
-                        document_id,
-                        CHUNK_SIZE,
-                        st.session_state.group_results
-                    )
-
-                    # 화면 갱신
                     st.rerun()
 
-                except APIStatusError as error:
-                    st.error("Groq API 요청 실패")
-                    st.write("상태 코드:", error.status_code)
-                    st.code(str(error)[:500])
-
                 except Exception as error:
-                    st.error(
-                        f"분석 오류: {type(error).__name__}"
-                    )
+                    log_failure(stage, error, **metadata)
+                    st.error(user_message(error))
 
         else:
             st.success("모든 그룹 분석이 완료됐습니다.")
 
-
-
-        # 7. 그룹별 분석 결과 출력
         st.subheader("그룹별 분석 결과")
 
         for group_index in sorted(st.session_state.group_results):
@@ -292,26 +218,21 @@ if uploaded_file is not None:
                 for warning in warnings:
                     st.warning(warning)
 
-        # 8. 그룹별 결과 통합
         st.divider()
         st.subheader("통합 분석 결과")
 
         if st.session_state.group_results:
-            # 1. 그룹별 분석 결과를 하나로 병합
 
+            stage = "candidate_merge"
             merged_result = merge_group_results(
                 st.session_state.group_results
             )
 
-            # 2. 병합된 후보에서 최종 대표값 선택
+            stage = "candidate_resolve"
             resolved_result = resolve_candidates(
                 merged_result,
                 pages
             )
-            #st.info("디버깅: 새로운 후보 선택 알고리즘 실행됨")
-
-            #st.write("사업명 선택:", resolved_result["사업명"]["selected"])
-            #st.write("사업기간 선택:", resolved_result["사업기간"]["selected"])
 
             if completed < total_groups:
                 st.info(
@@ -321,27 +242,30 @@ if uploaded_file is not None:
             else:
                 st.success("모든 그룹의 결과를 수집했습니다.")
 
-            #st.json(merged_result)
-            
-            # 사용자에게 대표값과 판단 상태를 우선 표시
+            stage = "result_display"
             final_results = {
                 field: {
                     "status": result["status"],
-                    "selected": result["selected"]
+                    "selected": result["selected"],
+                    "선택 후보 인용 검증": (
+                        "검토 필요" if any(
+                            candidate["issues"] or not candidate["valid_pages"]
+                            for candidate in result["candidates"]
+                            if candidate["value"] == result["selected"]
+                        ) or result["selected"] is None else "지정 페이지 인용 일치"
+                    )
                 }
                 for field, result in resolved_result.items()
             }
 
             st.json(final_results)
 
-            # 원래 후보 목록은 상세 검증용으로 보존
             with st.expander("전체 추출 후보 확인"):
                 st.json(merged_result)
-            
-            
-                        # 9. 사업비 금액 검증
+
             st.subheader("사업비 금액 검증")
 
+            stage = "budget_validation"
             budget_warnings = validate_budget_amount(
                 merged_result
             )
@@ -370,33 +294,12 @@ if uploaded_file is not None:
                     "사업비 금액 검증: 현재 비교 가능한 "
                     "금액에서 불일치가 발견되지 않았습니다."
                 )
-            
-            # 원문 근거 검증
-            # validation = validate_sources(merged_result, pages)
-            # if validation["issues"]:
-            #     st.subheader("원문 불일치 상세 정보")
-            #     st.json(validation["issues"])
 
-            # st.subheader("원문 근거 검증 결과")
-
-            # st.write("검사한 인용문:", validation["checked"])
-            # st.write("원문 일치:", validation["matched"])
-            # st.write("확인 필요:", len(validation["issues"]))
-
-            # for issue in validation["issues"]:
-            #     st.warning(
-            #         f"{issue['field']} / "
-            #         f"{issue['page']}페이지: "
-            #         f"{issue['reason']}"
-            #     )
-            
+            stage = "source_validation"
             validation = validate_sources(merged_result, pages)
 
             st.subheader("원문 근거 검증")
 
-            # st.write("검사한 인용문:", validation["checked"])
-            # st.write("원문 일치:", validation["matched"])
-            # st.write("불일치 개수:", len(validation["issues"]))
             st.write(
                 f"원문 근거 검증: "
                 f"{validation['checked']}개 중 "
@@ -404,13 +307,13 @@ if uploaded_file is not None:
                 f"{len(validation['issues'])}개 확인 필요"
             )
 
-            st.subheader("불일치 상세 내용")
-            st.json(validation["issues"])
-            # 불일치 원인 확인
             if validation["issues"]:
-            
+                with st.expander("원문 검증 실패 목록"):
+                    st.json(validation["issues"])
+            if validation["issues"]:
+
                 for index, issue in enumerate(validation["issues"]):
-                
+
                     field = issue["field"]
                     page_number = issue["page"]
 
@@ -418,22 +321,20 @@ if uploaded_file is not None:
                         f"{field} / PDF {page_number}페이지 상세 비교"
                     ):
 
-                        # 1. AI가 반환한 후보와 인용문 확인
                         st.write("AI가 추출한 정보")
 
                         candidates = merged_result[field]["candidates"]
 
                         for candidate in candidates:
-                        
+
                             for source in candidate["sources"]:
-                            
+
                                 if source["page"] == page_number:
-                                
+
                                     st.write("추출값:", candidate["value"])
                                     st.write("AI 인용문:")
                                     st.code(source["quote"])
 
-                        # 2. 실제 PDF 페이지 확인
                         original_page = next(
                             (
                                 page["text"]
@@ -444,89 +345,50 @@ if uploaded_file is not None:
                         )
 
                         if original_page is not None:
-                            # 실제 PDF 5페이지의 핵심 부분 확인
-                            if page_number == 5:
-                            
-                                st.write("PDF 5페이지 원문 확인")
-
-                                keyword = "제안요청서"
-
-                                position = original_page.find(keyword)
-
-                                if position != -1:
-                                    start = max(0, position - 100)
-                                    end = min(len(original_page), position + 400)
-
-                                    st.code(original_page[start:end])
-
-                                else:
-                                    st.code(original_page[:800])
                             st.text_area(
                                 "실제 PDF에서 추출한 원문",
                                 value=original_page,
                                 height=250,
-                                key=f"debug_page_{index}"
+                                key=f"source_page_{index}"
                             )
-                            # PDF 원문에서 사업명 근처의 내용 찾기
-                            keyword = "K-sure"
-
-                            position = original_page.find(keyword)
-
-                            if position != -1:
-                                start = max(0, position - 100)
-                                end = position + 200
-
-                                st.code(original_page[start:end])
-                            else:
-                                st.warning("해당 페이지에서 K-sure를 찾지 못했습니다.")
-
                         else:
                             st.warning("해당 PDF 페이지를 찾을 수 없습니다.")
 
-            # 복수 후보 확인
-            # for field, entry in merged_result.items():
-
-            #     if len(entry["candidates"]) > 1:
-            #         st.warning(
-            #             f"{field}: 서로 다른 후보가 발견됐습니다. "
-            #             "원문 확인이 필요합니다."
-            #         )
-                # 복수 후보 중 최종 대표값을 선택했는지 확인
             for field, entry in merged_result.items():
-            
+
                 candidate_count = len(entry["candidates"])
 
-                # 후보가 하나 이하이면 복수 후보 경고가 필요하지 않음
                 if candidate_count <= 1:
                     continue
-                
+
                 decision = resolved_result[field]
 
                 if decision["selected"] is not None:
-                
-                    # 대표값 선택에 성공한 경우
+
                     st.info(
                         f"{field}: 후보 {candidate_count}개 중 "
                         "대표값 선택을 완료했습니다."
                     )
 
                 else:
-                
-                    # 여전히 대표값을 결정하지 못한 경우
+
                     st.warning(
                         f"{field}: 후보 {candidate_count}개가 발견됐지만 "
                         "대표값을 확정하지 못했습니다. 원문 검토가 필요합니다."
                     )
 
             st.caption(
-                "근거 인용문과 페이지 번호는 "
-                "아직 원본 PDF와 자동 대조하지 않았습니다."
+                "인용문과 지정 페이지는 추출 텍스트와 공백을 무시해 대조합니다. "
+                "대표값 선택은 모든 인용문의 일치를 보장하지 않으며, 불일치 근거는 별도로 검토하세요. "
+                "사업비 조건 검증은 일부 조건만 검사합니다."
             )
 
         else:
             st.info("분석된 그룹이 아직 없습니다.")
 
     except Exception as error:
-        st.error(
-            f"PDF 처리 오류: {type(error).__name__}"
-        )
+        log_failure(stage, error, **metadata)
+        st.error(user_message(error))
+
+else:
+    set_document(st.session_state, None, CHUNK_SIZE)
