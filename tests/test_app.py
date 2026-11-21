@@ -30,6 +30,10 @@ class TestApp(unittest.TestCase):
             self.assertEqual(len(app.exception), 0)
             self.assertEqual(len(app.error), 0)
             self.assertEqual(app.session_state["group_results"], {0: result})
+            headings = [heading.value for heading in app.subheader]
+            for label in ("RFP 핵심 분석 결과", "사업명", "사업기간", "사업비", "사업목적", "제출기한"):
+                self.assertIn(label, headings)
+            self.assertIn("최종 결과 JSON 확인", [item.label for item in app.expander])
             self.assertTrue(any("모든 그룹 분석이 완료" in message.value for message in app.success))
             app.run()
             self.assertEqual(app.session_state["group_results"], {0: result})
